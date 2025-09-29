@@ -22,31 +22,84 @@ class ObsidianAPI:
     Handles authentication, HTTP requests, and common vault operations.
     """
 
-    def __init__(self, api_base_url: str = "https://127.0.0.1:27124", api_key_file: str = ".env"):
+    def __init__(self, api_base_url: str = None, api_key_file: str = ".env"):
         """
         Initialize the API client.
 
         Args:
-            api_base_url: Base URL for the Obsidian REST API
+            api_base_url: Base URL for the Obsidian REST API (if None, loads from settings.json)
             api_key_file: Path to file containing API key
         """
-        self.api_base_url = api_base_url
         self.api_key_file = api_key_file
+        self.api_base_url = api_base_url or self._load_api_base_url()
         self.api_key = self._load_api_key()
+
+    def _load_api_base_url(self) -> str:
+        """Load API base URL from settings.json."""
+        settings_path = Path(__file__).parent / "settings.json"
+        try:
+            with open(settings_path, 'r') as f:
+                settings = json.load(f)
+                api_url = settings.get("api_base_url")
+                if not api_url:
+                    raise ValueError("api_base_url not found in settings.json")
+                return api_url
+        except FileNotFoundError:
+            raise FileNotFoundError(f"{settings_path} not found")
+        except json.JSONDecodeError:
+            raise ValueError(f"Invalid JSON in {settings_path}")
 
     def _load_api_key(self) -> str:
         """Load API key from environment file."""
         try:
-            # Navigate from utilities_data/obsidian_mv/ back to vault root
-            # Path: utilities_data/obsidian_mv/ -> utilities_data/ -> utilities/ -> system/ -> life/ -> vault/
-            env_path = Path(__file__).parent.parent.parent.parent.parent.parent / self.api_key_file
+            # Navigate from utilities_data/obsidian_mv/ back to utilities/
+            # Path: utilities_data/obsidian_mv/ -> utilities_data/ -> utilities/
+            env_path = Path(__file__).parent.parent.parent / self.api_key_file
             with open(env_path, 'r') as f:
                 for line in f:
-                    if line.strip().startswith('OBSIDIAN_API_KEY'):
+                    if line.strip().startswith('LOCAL_OBSIDIAN_KEY'):
                         return line.split('=')[1].strip().strip('"')
-            raise ValueError("OBSIDIAN_API_KEY not found in .env file")
+            raise ValueError("LOCAL_OBSIDIAN_KEY not found in .env file")
         except FileNotFoundError:
             raise FileNotFoundError(f"{self.api_key_file} file not found")
+
+    def make_request(self, endpoint: str, method: str = "GET", headers: Dict = None,
+                     params: Dict = None, data: str = None) -> Optional[requests.Response]:
+        """
+        Make a generic HTTP request to the Obsidian API.
+
+        Args:
+            endpoint: API endpoint path (e.g., "/vault/file.md")
+            method: HTTP method (GET, POST, PUT, DELETE)
+            headers: Optional additional headers (auth and basic headers added automatically)
+            params: Optional query parameters
+            data: Optional request body data
+
+        Returns:
+            Response object, or None if request fails
+        """
+        url = f"{self.api_base_url}{endpoint}"
+
+        # Build headers with authentication
+        request_headers = {
+            'Authorization': f'Bearer {self.api_key}'
+        }
+        if headers:
+            request_headers.update(headers)
+
+        try:
+            response = requests.request(
+                method=method,
+                url=url,
+                headers=request_headers,
+                params=params,
+                data=data.encode('utf-8') if data else None,
+                verify=False,
+                timeout=10
+            )
+            return response
+        except requests.exceptions.RequestException:
+            return None
 
     def get_file_content(self, filepath: str) -> Optional[str]:
         """
@@ -59,27 +112,14 @@ class ObsidianAPI:
             File content as string, or None if file not found or error
         """
         encoded_path = quote(filepath, safe='/')
+        headers = {'Accept': 'application/vnd.olrapi.note+json'}
 
-        headers = {
-            'Authorization': f'Bearer {self.api_key}',
-            'Accept': 'application/vnd.olrapi.note+json'
-        }
+        response = self.make_request(f"/vault/{encoded_path}", headers=headers)
 
-        try:
-            response = requests.get(
-                f"{self.api_base_url}/vault/{encoded_path}",
-                headers=headers,
-                verify=False,
-                timeout=10
-            )
-
-            if response.status_code == 200:
-                data = response.json()
-                return data.get('content', '')
-            else:
-                return None
-
-        except requests.exceptions.RequestException:
+        if response and response.status_code == 200:
+            data = response.json()
+            return data.get('content', '')
+        else:
             return None
 
     def update_file_content(self, filepath: str, content: str) -> bool:
@@ -94,25 +134,16 @@ class ObsidianAPI:
             True if successful, False otherwise
         """
         encoded_path = quote(filepath, safe='/')
+        headers = {'Content-Type': 'text/markdown'}
 
-        headers = {
-            'Authorization': f'Bearer {self.api_key}',
-            'Content-Type': 'text/markdown'
-        }
+        response = self.make_request(
+            f"/vault/{encoded_path}",
+            method="PUT",
+            headers=headers,
+            data=content
+        )
 
-        try:
-            response = requests.put(
-                f"{self.api_base_url}/vault/{encoded_path}",
-                headers=headers,
-                data=content.encode('utf-8'),
-                verify=False,
-                timeout=10
-            )
-
-            return response.status_code in [200, 204]
-
-        except requests.exceptions.RequestException:
-            return False
+        return response is not None and response.status_code in [200, 204]
 
     def delete_file(self, filepath: str) -> bool:
         """
@@ -126,22 +157,9 @@ class ObsidianAPI:
         """
         encoded_path = quote(filepath, safe='/')
 
-        headers = {
-            'Authorization': f'Bearer {self.api_key}'
-        }
+        response = self.make_request(f"/vault/{encoded_path}", method="DELETE")
 
-        try:
-            response = requests.delete(
-                f"{self.api_base_url}/vault/{encoded_path}",
-                headers=headers,
-                verify=False,
-                timeout=10
-            )
-
-            return response.status_code in [200, 204]
-
-        except requests.exceptions.RequestException:
-            return False
+        return response is not None and response.status_code in [200, 204]
 
     def find_references(self, filename: str) -> List[Dict[str, str]]:
         """
@@ -159,26 +177,13 @@ class ObsidianAPI:
         # Prepare the Dataview query
         query = f"TABLE file.path, file.inlinks FROM [[{search_name}]]"
 
-        headers = {
-            'Authorization': f'Bearer {self.api_key}',
-            'Content-Type': 'application/vnd.olrapi.dataview.dql+txt'
-        }
+        headers = {'Content-Type': 'application/vnd.olrapi.dataview.dql+txt'}
 
-        try:
-            response = requests.post(
-                f"{self.api_base_url}/search/",
-                headers=headers,
-                data=query,
-                verify=False,
-                timeout=10
-            )
+        response = self.make_request("/search/", method="POST", headers=headers, data=query)
 
-            if response.status_code == 200:
-                return response.json()
-            else:
-                return []
-
-        except requests.exceptions.RequestException:
+        if response and response.status_code == 200:
+            return response.json()
+        else:
             return []
 
     def extract_link_references(self, content: str, target_note: str) -> List[str]:

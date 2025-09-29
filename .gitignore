@@ -12,6 +12,3 @@ env/
 
 # Test files
 utilities_data/obsidian_mv/copy-to-vault-to-test/
-
-# Environment
-.env

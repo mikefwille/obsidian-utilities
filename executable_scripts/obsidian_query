@@ -1,51 +1,46 @@
 #!/usr/bin/env python3
 
-import os
 import sys
-import requests
 import json
 import argparse
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 from urllib.parse import quote
-from dotenv import load_dotenv
+
+# Add utilities_data to path to import obsidian_api
+sys.path.insert(0, str(Path(__file__).parent.parent / "utilities_data" / "obsidian_mv"))
+from obsidian_api import ObsidianAPI
 
 class ObsidianQuery:
     def __init__(self):
-        # Load environment variables
-        script_dir = Path(__file__).parent
-        utilities_dir = script_dir.parent
-        env_file = utilities_dir / ".env"
-        
-        load_dotenv(env_file)
-        
-        self.api_key = os.getenv("LOCAL_OBSIDIAN_KEY")
-        if not self.api_key:
-            print("Error: LOCAL_OBSIDIAN_KEY not found in .env file")
+        # Initialize ObsidianAPI for shared functionality
+        try:
+            self.api = ObsidianAPI()
+        except (FileNotFoundError, ValueError) as e:
+            print(f"Error initializing Obsidian API: {e}")
             sys.exit(1)
+
+        # Store base URL for convenience
+        self.base_url = self.api.api_base_url
         
-        self.base_url = "https://127.0.0.1:27124"
-        self.headers = {
-            "Authorization": f"Bearer {self.api_key}",
+    def _request(self, endpoint: str, method: str = "GET", params: Dict = None, data: str = None) -> Any:
+        """Make API request with error handling"""
+        headers = {
             "Content-Type": "application/json",
             "Accept": "application/vnd.olrapi.note+json"
         }
-        
-    def _request(self, endpoint: str, method: str = "GET", params: Dict = None) -> Any:
-        """Make API request with error handling"""
-        try:
-            url = f"{self.base_url}{endpoint}"
-            response = requests.request(method, url, headers=self.headers, 
-                                      params=params, verify=False)
-            
-            if response.status_code == 200:
-                return response.json()
-            else:
-                print(f"API error {response.status_code}: {response.text}")
-                return None
-        except requests.exceptions.RequestException as e:
-            print(f"Connection error: {e}")
+
+        response = self.api.make_request(endpoint, method=method, headers=headers, params=params, data=data)
+
+        if response is None:
+            print("Connection error: Unable to reach Obsidian API")
             sys.exit(1)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            print(f"API error {response.status_code}: {response.text}")
+            return None
     
     def get_vault_files(self) -> List[str]:
         """Get list of all files in vault recursively"""
