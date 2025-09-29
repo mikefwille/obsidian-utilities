@@ -1,0 +1,9 @@
+{
+  "_comment": "Configuration for obsidian_mv script",
+  "_explanation": {
+    "vault_root": "This is the absolute path to the Obsidian vault root directory. The obsidian_mv script uses this to convert user paths (relative to their current working directory) into paths that the Obsidian Local REST API expects (relative to the vault root). For example, if user is in /path/to/your/obsidian/vault/test/ and runs 'obsidian_mv popular.md new.md', the script strips the vault_root from the current directory to get 'test/', then prepends that to the filename to create 'test/popular.md' for the API call.",
+    "debug_mode": "Controls verbosity for BOTH the mv bash wrapper script (/executable_scripts/mv) AND the obsidian_mv Python script (/executable_scripts/obsidian_mv). When true, shows detailed debug output including logic checks, path conversions, and processing steps. When false, only shows essential output and errors. This affects: 1) The bash mv wrapper's 50+ debug echo statements showing decision logic, file path resolution, and condition checking, 2) The obsidian_mv Python script's progress messages like 'Finding references...', 'Processing file...'. Default is false for clean output during normal use. Toggle to true when troubleshooting issues with file moves or reference updates."
+  },
+  "vault_root": "/path/to/your/obsidian/vault/",
+  "debug_mode": false
+}

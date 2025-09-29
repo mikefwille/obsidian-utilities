@@ -1,0 +1,354 @@
+#!/usr/bin/env python3
+"""
+mdquery - A utility for querying YAML front matter in markdown files
+"""
+
+import argparse
+import os
+import sys
+import yaml
+import re
+from collections import defaultdict, Counter
+from pathlib import Path
+from typing import Dict, List, Any, Set, Optional
+
+# Import formatters from utilities_data
+script_dir = Path(__file__).parent
+utilities_dir = script_dir.parent
+formatters_dir = utilities_dir / "utilities_data" / "mdquery"
+sys.path.append(str(formatters_dir))
+from formatters import format_output
+
+
+class MarkdownQuery:
+    def __init__(self, directory: str = ".", recursive: bool = True, pattern: str = "*.md"):
+        self.directory = Path(directory)
+        self.recursive = recursive
+        self.pattern = pattern
+        self.files_data = []
+        
+    def scan_files(self):
+        """Scan directory for markdown files and extract YAML front matter"""
+        if self.recursive:
+            md_files = self.directory.rglob(self.pattern)
+        else:
+            md_files = self.directory.glob(self.pattern)
+            
+        for file_path in md_files:
+            try:
+                yaml_data = self.extract_yaml_frontmatter(file_path)
+                if yaml_data:
+                    self.files_data.append({
+                        'file_path': str(file_path),
+                        'relative_path': str(file_path.relative_to(self.directory)),
+                        'yaml_data': yaml_data
+                    })
+            except Exception as e:
+                print(f"Warning: Error processing {file_path}: {e}", file=sys.stderr)
+    
+    def extract_yaml_frontmatter(self, file_path: Path) -> Optional[Dict[str, Any]]:
+        """Extract YAML front matter from a markdown file"""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Check for YAML front matter (--- at start, --- to end)
+            if not content.startswith('---\n'):
+                return None
+            
+            # Find the end of the front matter
+            end_match = re.search(r'\n---\n', content)
+            if not end_match:
+                return None
+            
+            yaml_content = content[4:end_match.start()]  # Skip first ---\n
+            return yaml.safe_load(yaml_content)
+            
+        except Exception as e:
+            raise Exception(f"Failed to parse YAML: {e}")
+    
+    def list_properties(self) -> Dict[str, int]:
+        """List all YAML properties and their frequency"""
+        property_counts = Counter()
+        for file_data in self.files_data:
+            for prop in file_data['yaml_data'].keys():
+                property_counts[prop] += 1
+        return dict(property_counts)
+    
+    def show_property_values(self, property_name: str) -> Set[Any]:
+        """Show all unique values for a given property"""
+        values = set()
+        for file_data in self.files_data:
+            yaml_data = file_data['yaml_data']
+            if property_name in yaml_data:
+                value = yaml_data[property_name]
+                if isinstance(value, list):
+                    values.update(value)
+                else:
+                    values.add(value)
+        return values
+    
+    def get_statistics(self) -> Dict[str, Any]:
+        """Get overall statistics about the collection"""
+        total_files = len(self.files_data)
+        properties = self.list_properties()
+        
+        return {
+            'total_files': total_files,
+            'total_properties': len(properties),
+            'most_common_properties': Counter(properties).most_common(10),
+            'files_with_yaml': total_files
+        }
+    
+    def search_by_property(self, property_filters: List[str]) -> List[Dict[str, Any]]:
+        """Search files by property key=value pairs"""
+        results = []
+        
+        for file_data in self.files_data:
+            yaml_data = file_data['yaml_data']
+            match = True
+            
+            for prop_filter in property_filters:
+                if '=' not in prop_filter:
+                    print(f"Warning: Invalid property filter '{prop_filter}'. Use KEY=VALUE format.", file=sys.stderr)
+                    continue
+                
+                key, value = prop_filter.split('=', 1)
+                key = key.strip()
+                value = value.strip().strip('"\'')  # Remove quotes if present
+                
+                if key not in yaml_data:
+                    match = False
+                    break
+                
+                yaml_value = yaml_data[key]
+                # Handle different value types
+                if isinstance(yaml_value, list):
+                    if value not in [str(v) for v in yaml_value]:
+                        match = False
+                        break
+                elif str(yaml_value) != value:
+                    match = False
+                    break
+            
+            if match:
+                results.append(file_data)
+        
+        return results
+    
+    def search_by_tags(self, tags: List[str], tag_property: str = 'ai_tags') -> List[Dict[str, Any]]:
+        """Search files containing all specified tags"""
+        results = []
+        
+        for file_data in self.files_data:
+            yaml_data = file_data['yaml_data']
+            
+            if tag_property not in yaml_data:
+                continue
+                
+            file_tags = yaml_data[tag_property]
+            if not isinstance(file_tags, list):
+                continue
+            
+            # Check if all required tags are present
+            if all(tag in file_tags for tag in tags):
+                results.append(file_data)
+        
+        return results
+    
+    def search_text(self, search_text: str) -> List[Dict[str, Any]]:
+        """Search for text within YAML values"""
+        results = []
+        search_text = search_text.lower()
+        
+        for file_data in self.files_data:
+            yaml_data = file_data['yaml_data']
+            match = False
+            
+            for key, value in yaml_data.items():
+                if isinstance(value, str) and search_text in value.lower():
+                    match = True
+                    break
+                elif isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, str) and search_text in item.lower():
+                            match = True
+                            break
+                    if match:
+                        break
+            
+            if match:
+                results.append(file_data)
+        
+        return results
+    
+
+
+
+
+def create_parser() -> argparse.ArgumentParser:
+    """Create argument parser"""
+    parser = argparse.ArgumentParser(
+        description="""
+📁 MARKDOWN NOTE FINDER
+
+Quickly find and analyze your markdown notes by searching their metadata (YAML front matter).
+
+Perfect for large collections of notes, videos, articles, or any markdown files with structured 
+metadata at the top. Instead of manually browsing hundreds of files, use this to instantly 
+find what you're looking for.
+
+WHAT IT DOES:
+• Find notes by topic, type, tags, or any metadata field
+• Count how many notes match your criteria  
+• Discover what's in your collection (what topics, types, etc.)
+• Export results for further analysis
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+GETTING STARTED:
+  1. First, explore what's in your collection:
+     %(prog)s --list-properties                    # See all available properties
+     %(prog)s --stats                              # Get overview statistics
+     %(prog)s --show-values content_type           # See all content types
+  
+  2. Then search for files:
+     %(prog)s --property source=youtube            # Find all YouTube videos
+     %(prog)s --tag wildlife                       # Find files tagged with 'wildlife'
+     %(prog)s --search "grizzly bear"              # Find files mentioning grizzly bears
+  
+  3. Customize your output:
+     %(prog)s --tag wildlife --count               # Just count matches
+     %(prog)s --tag wildlife --fields youtube_title,url  # Show specific fields
+     %(prog)s --property source=youtube --output table --fields content_type,youtube_title
+
+COMMON WORKFLOWS:
+  • Find videos by topic:        %(prog)s --property ai_primary_topic="machine learning"
+  • Count files by type:         %(prog)s --property content_type="Tutorial" --count
+  • Find recent entertainment:   %(prog)s --property content_type="Entertainment/Short-Form"
+  • Search within summaries:     %(prog)s --search "python programming"
+  • Multiple filters:            %(prog)s --property source=youtube --tag programming --count
+  • Export to JSON:              %(prog)s --tag wildlife --output json > wildlife.json
+
+NOTE: Use quotes around values with spaces: --property content_type="Long Form Content"
+        """)
+    
+    # Discovery options - start here!
+    discovery = parser.add_argument_group('🔍 Discovery (Start Here!)')
+    discovery.add_argument('--list-properties', action='store_true',
+                          help='Show all YAML properties in your files (great first command)')
+    discovery.add_argument('--show-values', metavar='PROPERTY',
+                          help='Show all possible values for a property (e.g. --show-values content_type)')
+    discovery.add_argument('--stats', action='store_true',
+                          help='Show summary statistics about your collection')
+    
+    # Search options
+    search = parser.add_argument_group('🔎 Search Your Files')
+    search.add_argument('--property', metavar='KEY=VALUE', action='append',
+                       help='Find files where property equals value (e.g. --property source=youtube)')
+    search.add_argument('--tag', metavar='TAG', action='append',
+                       help='Find files with specific tag (e.g. --tag programming)')
+    search.add_argument('--search', metavar='TEXT',
+                       help='Find text anywhere in YAML values (e.g. --search "machine learning")')
+    
+    # Output options
+    output = parser.add_argument_group('📋 Control Output')
+    output.add_argument('--count', action='store_true',
+                       help='Just show the number of matching files')
+    output.add_argument('--fields', metavar='FIELD1,FIELD2',
+                       help='Show only specific fields (e.g. --fields youtube_title,content_type)')
+    output.add_argument('--output', choices=['list', 'table', 'json', 'csv'], default='list',
+                       help='Format: list=simple, table=columns, json=structured data, csv=spreadsheet file')
+    output.add_argument('--csv-file', metavar='FILENAME', default='mdquery.csv',
+                       help='CSV output filename (default: mdquery.csv)')
+    
+    # Utility options
+    utility = parser.add_argument_group('⚙️  Advanced Options')
+    utility.add_argument('--directory', '-d', metavar='PATH', default='.',
+                        help='Which folder to search (default: current folder)')
+    utility.add_argument('--recursive', '-r', action='store_true', default=True,
+                        help='Include subfolders (default: yes)')
+    utility.add_argument('--no-recursive', action='store_false', dest='recursive',
+                        help='Only search current folder, not subfolders')
+    utility.add_argument('--pattern', metavar='PATTERN', default='*.md',
+                        help='File pattern to match (default: *.md for markdown files)')
+    
+    return parser
+
+
+def main():
+    parser = create_parser()
+    args = parser.parse_args()
+    
+    # Initialize query engine
+    mq = MarkdownQuery(args.directory, args.recursive, args.pattern)
+    
+    try:
+        mq.scan_files()
+    except Exception as e:
+        print(f"Error scanning files: {e}", file=sys.stderr)
+        sys.exit(1)
+    
+    if not mq.files_data:
+        print("No markdown files with YAML front matter found.")
+        sys.exit(0)
+    
+    # Handle discovery options
+    if args.list_properties:
+        properties = mq.list_properties()
+        print("Available properties:")
+        for prop, count in sorted(properties.items()):
+            print(f"  {prop}: {count} files")
+        return
+    
+    if args.show_values:
+        values = mq.show_property_values(args.show_values)
+        print(f"Values for '{args.show_values}':")
+        for value in sorted(values):
+            print(f"  {value}")
+        return
+    
+    if args.stats:
+        stats = mq.get_statistics()
+        print("Collection Statistics:")
+        print(f"  Total files: {stats['total_files']}")
+        print(f"  Total unique properties: {stats['total_properties']}")
+        print("  Most common properties:")
+        for prop, count in stats['most_common_properties']:
+            print(f"    {prop}: {count}")
+        return
+    
+    # Handle search options
+    search_results = mq.files_data  # Start with all files
+    
+    # Apply property filters
+    if args.property:
+        search_results = mq.search_by_property(args.property)
+    
+    # Apply tag filters
+    if args.tag:
+        if search_results == mq.files_data:  # No previous filter
+            search_results = mq.search_by_tags(args.tag)
+        else:  # Combine with previous results
+            tag_results = mq.search_by_tags(args.tag)
+            search_results = [f for f in search_results if f in tag_results]
+    
+    # Apply text search
+    if args.search:
+        if search_results == mq.files_data:  # No previous filter
+            search_results = mq.search_text(args.search)
+        else:  # Combine with previous results
+            text_results = mq.search_text(args.search)
+            search_results = [f for f in search_results if f in text_results]
+    
+    # Handle output options
+    if args.count:
+        print(len(search_results))
+        return
+    
+    # Format and display results
+    format_output(search_results, args.output, args.fields, getattr(args, 'csv_file', 'mdquery.csv'))
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,371 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+import requests
+import json
+import argparse
+from pathlib import Path
+from typing import Dict, List, Any, Optional
+from urllib.parse import quote
+from dotenv import load_dotenv
+
+class ObsidianQuery:
+    def __init__(self):
+        # Load environment variables
+        script_dir = Path(__file__).parent
+        utilities_dir = script_dir.parent
+        env_file = utilities_dir / ".env"
+        
+        load_dotenv(env_file)
+        
+        self.api_key = os.getenv("LOCAL_OBSIDIAN_KEY")
+        if not self.api_key:
+            print("Error: LOCAL_OBSIDIAN_KEY not found in .env file")
+            sys.exit(1)
+        
+        self.base_url = "https://127.0.0.1:27124"
+        self.headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/vnd.olrapi.note+json"
+        }
+        
+    def _request(self, endpoint: str, method: str = "GET", params: Dict = None) -> Any:
+        """Make API request with error handling"""
+        try:
+            url = f"{self.base_url}{endpoint}"
+            response = requests.request(method, url, headers=self.headers, 
+                                      params=params, verify=False)
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                print(f"API error {response.status_code}: {response.text}")
+                return None
+        except requests.exceptions.RequestException as e:
+            print(f"Connection error: {e}")
+            sys.exit(1)
+    
+    def get_vault_files(self) -> List[str]:
+        """Get list of all files in vault recursively"""
+        all_files = []
+        self._get_files_recursive("", all_files)
+        return all_files
+    
+    def _get_files_recursive(self, path: str, all_files: List[str]):
+        """Recursively get all files in vault using proper directory API"""
+        from urllib.parse import quote
+        
+        if path:
+            # Use the proper directory endpoint format from docs
+            endpoint = f"/vault/{quote(path, safe='')}/"
+        else:
+            endpoint = "/vault/"
+            
+        result = self._request(endpoint)
+        
+        if not result or "files" not in result:
+            return
+        
+        for item in result["files"]:
+            if path:
+                full_path = f"{path}/{item}"
+            else:
+                full_path = item
+            
+            if item.endswith('/'):  # Directory
+                # Remove trailing slash and recurse
+                dir_path = full_path.rstrip('/')
+                self._get_files_recursive(dir_path, all_files)
+            else:  # File
+                all_files.append(full_path)
+    
+    def search_vault(self, query: str) -> List[Dict]:
+        """Search vault using Obsidian's simple search engine"""
+        params = {"query": query}
+        result = self._request("/search/simple/", "POST", params)
+        return result if result and isinstance(result, list) else []
+    
+    def get_note_data(self, file_path: str) -> Optional[Dict]:
+        """Get structured note data including frontmatter, content, and metadata"""
+        if not file_path.endswith('.md'):
+            file_path += '.md'
+        
+        encoded_path = quote(file_path, safe='/')
+        result = self._request(f"/vault/{encoded_path}")
+        return result
+    
+    def find_by_frontmatter(self, property_filters: List[str]) -> List[Dict]:
+        """Find notes by frontmatter properties"""
+        results = []
+        files = self.get_vault_files()
+        
+        for file_path in files:
+            if not file_path.endswith('.md'):
+                continue
+                
+            note_data = self.get_note_data(file_path)
+            if not note_data or not note_data.get('frontmatter'):
+                continue
+            
+            frontmatter = note_data['frontmatter']
+            match = True
+            
+            for prop_filter in property_filters:
+                if '=' not in prop_filter:
+                    continue
+                    
+                key, value = prop_filter.split('=', 1)
+                key = key.strip()
+                value = value.strip().strip('"\'')
+                
+                if key not in frontmatter:
+                    match = False
+                    break
+                
+                fm_value = frontmatter[key]
+                if isinstance(fm_value, list):
+                    if value not in [str(v) for v in fm_value]:
+                        match = False
+                        break
+                elif str(fm_value) != value:
+                    match = False
+                    break
+            
+            if match:
+                results.append(note_data)
+        
+        return results
+    
+    def find_by_tags(self, tags: List[str]) -> List[Dict]:
+        """Find notes containing specific tags (uses Obsidian's tag parsing)"""
+        results = []
+        
+        # Use Obsidian search for tags
+        tag_query = " ".join([f"tag:{tag}" for tag in tags])
+        search_results = self.search_vault(tag_query)
+        
+        for result in search_results:
+            note_data = self.get_note_data(result.get('filename', ''))
+            if note_data:
+                results.append(note_data)
+        
+        return results
+    
+    def search_content(self, search_text: str) -> List[Dict]:
+        """Search note content using Obsidian's search"""
+        search_results = self.search_vault(f'"{search_text}"')
+        results = []
+        
+        for result in search_results:
+            note_data = self.get_note_data(result.get('filename', ''))
+            if note_data:
+                results.append(note_data)
+        
+        return results
+    
+    def get_statistics(self) -> Dict[str, Any]:
+        """Get vault statistics"""
+        files = self.get_vault_files()
+        md_files = [f for f in files if f.endswith('.md')]
+        
+        # Sample some files to get property stats
+        property_counts = {}
+        sample_size = min(100, len(md_files))  # Limit for performance
+        
+        for file_path in md_files[:sample_size]:
+            note_data = self.get_note_data(file_path)
+            if note_data and note_data.get('frontmatter'):
+                for prop in note_data['frontmatter'].keys():
+                    property_counts[prop] = property_counts.get(prop, 0) + 1
+        
+        return {
+            'total_files': len(files),
+            'markdown_files': len(md_files),
+            'sampled_files': sample_size,
+            'common_properties': sorted(property_counts.items(), key=lambda x: x[1], reverse=True)
+        }
+    
+    def get_property_values(self, property_name: str) -> List[Any]:
+        """Get all values for a specific frontmatter property"""
+        files = self.get_vault_files()
+        md_files = [f for f in files if f.endswith('.md')]
+        values = set()
+        
+        for file_path in md_files:
+            note_data = self.get_note_data(file_path)
+            if note_data and note_data.get('frontmatter'):
+                frontmatter = note_data['frontmatter']
+                if property_name in frontmatter:
+                    value = frontmatter[property_name]
+                    if isinstance(value, list):
+                        values.update(value)
+                    else:
+                        values.add(value)
+        
+        return sorted(list(values))
+
+def format_results(results: List[Dict], output_format: str, fields: str = None):
+    """Format and display results"""
+    if output_format == 'count':
+        print(len(results))
+        return
+    
+    if not results:
+        print("No results found.")
+        return
+    
+    if fields:
+        field_list = [f.strip() for f in fields.split(',')]
+    else:
+        field_list = None
+    
+    if output_format == 'json':
+        print(json.dumps(results, indent=2, default=str))
+    elif output_format == 'table':
+        # Simple table format
+        if not field_list:
+            print(f"{'Path':<50} {'Tags':<30} {'Modified'}")
+            print("-" * 90)
+            for result in results:
+                path = result.get('path', '')[:47] + "..." if len(result.get('path', '')) > 50 else result.get('path', '')
+                tags = ', '.join(result.get('tags', []))[:27] + "..." if len(', '.join(result.get('tags', []))) > 30 else ', '.join(result.get('tags', []))
+                mtime = result.get('stat', {}).get('mtime', '')
+                print(f"{path:<50} {tags:<30} {mtime}")
+        else:
+            # Custom fields table
+            print('\t'.join(field_list))
+            print("-" * (len('\t'.join(field_list)) + 20))
+            for result in results:
+                row = []
+                for field in field_list:
+                    if field in result:
+                        value = result[field]
+                        if isinstance(value, list):
+                            row.append(', '.join(map(str, value)))
+                        else:
+                            row.append(str(value))
+                    elif field in result.get('frontmatter', {}):
+                        value = result['frontmatter'][field]
+                        if isinstance(value, list):
+                            row.append(', '.join(map(str, value)))
+                        else:
+                            row.append(str(value))
+                    else:
+                        row.append('')
+                print('\t'.join(row))
+    else:  # list format
+        for result in results:
+            print(f"📄 {result.get('path', 'Unknown')}")
+            if result.get('tags'):
+                print(f"   🏷️  {', '.join(result['tags'])}")
+            if result.get('frontmatter'):
+                for key, value in list(result['frontmatter'].items())[:3]:  # Show first 3 properties
+                    if isinstance(value, list):
+                        print(f"   {key}: {', '.join(map(str, value))}")
+                    else:
+                        print(f"   {key}: {value}")
+            print()
+
+def create_parser():
+    parser = argparse.ArgumentParser(
+        description="🔍 Obsidian Query - Search your Obsidian vault using the REST API",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+EXAMPLES:
+  obsidian_query --stats                           # Show vault statistics
+  obsidian_query --property source=youtube        # Find notes with source=youtube
+  obsidian_query --tag programming                # Find notes tagged with programming
+  obsidian_query --search "machine learning"      # Search note content
+  obsidian_query --property type=article --count  # Count articles
+  obsidian_query --tag ai --output json           # Export AI-tagged notes as JSON
+
+ADVANTAGES over mdquery:
+  • Uses Obsidian's search engine (faster, indexed)
+  • Finds tags in content (#tag) not just frontmatter
+  • Access to Obsidian's parsed metadata
+  • Works with currently open vault
+        """
+    )
+    
+    # Discovery
+    discovery = parser.add_argument_group('🔍 Discovery')
+    discovery.add_argument('--stats', action='store_true',
+                          help='Show vault statistics')
+    discovery.add_argument('--show-values', metavar='PROPERTY',
+                          help='Show all values for a frontmatter property')
+    
+    # Search
+    search = parser.add_argument_group('🔎 Search')
+    search.add_argument('--property', metavar='KEY=VALUE', action='append',
+                       help='Find notes by frontmatter property')
+    search.add_argument('--tag', metavar='TAG', action='append',
+                       help='Find notes with specific tag')
+    search.add_argument('--search', metavar='TEXT',
+                       help='Search note content')
+    
+    # Output
+    output = parser.add_argument_group('📋 Output')
+    output.add_argument('--count', action='store_true',
+                       help='Show count only')
+    output.add_argument('--output', choices=['list', 'table', 'json'], default='list',
+                       help='Output format')
+    output.add_argument('--fields', metavar='FIELD1,FIELD2',
+                       help='Show specific fields only')
+    
+    return parser
+
+def main():
+    parser = create_parser()
+    args = parser.parse_args()
+    
+    # Initialize Obsidian query
+    oq = ObsidianQuery()
+    
+    # Handle discovery options
+    if args.stats:
+        stats = oq.get_statistics()
+        print("📊 Vault Statistics:")
+        print(f"   Total files: {stats['total_files']}")
+        print(f"   Markdown files: {stats['markdown_files']}")
+        print(f"   Sampled files: {stats['sampled_files']}")
+        print("   Common properties:")
+        for prop, count in stats['common_properties'][:10]:
+            print(f"     {prop}: {count}")
+        
+        # Show the actual files
+        files = oq.get_vault_files()
+        print("\n📁 Files found:")
+        for f in files:
+            print(f"   {f}")
+        return
+    
+    if args.show_values:
+        values = oq.get_property_values(args.show_values)
+        print(f"Values for '{args.show_values}':")
+        for value in values:
+            print(f"  {value}")
+        return
+    
+    # Handle search options
+    results = []
+    
+    if args.property:
+        results = oq.find_by_frontmatter(args.property)
+    elif args.tag:
+        results = oq.find_by_tags(args.tag)
+    elif args.search:
+        results = oq.search_content(args.search)
+    else:
+        print("Please specify a search option (--property, --tag, or --search)")
+        return
+    
+    # Format output
+    if args.count:
+        format_results(results, 'count')
+    else:
+        format_results(results, args.output, args.fields)
+
+if __name__ == "__main__":
+    main()

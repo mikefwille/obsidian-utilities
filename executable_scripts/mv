@@ -1,0 +1,200 @@
+#!/bin/bash
+
+# mv script with obsidian integration for markdown files in vault
+
+# Check debug mode from settings
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+UTILITIES_DIR="$(dirname "$SCRIPT_DIR")"
+SETTINGS_FILE="$UTILITIES_DIR/utilities_data/obsidian_mv/settings.json"
+DEBUG_MODE=$(python3 -c "import json; print(json.load(open('$SETTINGS_FILE')).get('debug_mode', False))" 2>/dev/null || echo "false")
+
+if [ "$DEBUG_MODE" = "True" ]; then
+  echo "🔧 DEBUG MODE: mv with obsidian integration"
+  echo "📋 Arguments: $*"
+fi
+
+# Flags to track conditions
+is_markdown=false
+is_in_vault=false
+
+if [ "$DEBUG_MODE" = "True" ]; then
+  echo ""
+  echo "🔍 LOGIC CHECK #1: Checking for markdown files..."
+fi
+
+# Loop through all arguments to check conditions
+for arg in "$@"; do
+  # Skip flags (arguments starting with -)
+  if [[ "$arg" == -* ]]; then
+    [ "$DEBUG_MODE" = "True" ] && echo "   ⏭️  Skipping flag: $arg"
+    continue
+  fi
+
+  [ "$DEBUG_MODE" = "True" ] && echo "   📄 Checking argument: $arg"
+
+  # Check if argument is a markdown file
+  if [[ "$arg" == *.md ]]; then
+    is_markdown=true
+    [ "$DEBUG_MODE" = "True" ] && echo "   ✅ MARKDOWN: $arg ends with .md"
+  else
+    [ "$DEBUG_MODE" = "True" ] && echo "   ❌ NOT MARKDOWN: $arg does not end with .md"
+  fi
+
+  # Convert relative path to absolute path for checking
+  [ "$DEBUG_MODE" = "True" ] && echo "   🔄 Converting to absolute path..."
+
+  if [[ -e "$arg" ]]; then
+    abs_path=$(realpath "$arg" 2>/dev/null || echo "$arg")
+    [ "$DEBUG_MODE" = "True" ] && echo "      File exists: $abs_path"
+  else
+    # For non-existent files, try to resolve the parent directory
+    parent_dir=$(dirname "$arg")
+    filename=$(basename "$arg")
+    if [[ -d "$parent_dir" ]]; then
+      parent_abs=$(realpath "$parent_dir" 2>/dev/null || echo "$parent_dir")
+      abs_path="$parent_abs/$filename"
+      [ "$DEBUG_MODE" = "True" ] && echo "      File doesn't exist, constructed: $abs_path"
+    else
+      # If parent doesn't exist either, try to construct path from current directory
+      abs_path="$(pwd)/$arg"
+      [ "$DEBUG_MODE" = "True" ] && echo "      Parent doesn't exist, using PWD: $abs_path"
+    fi
+  fi
+
+  if [ "$DEBUG_MODE" = "True" ]; then
+    echo ""
+    echo "🔍 LOGIC CHECK #2: Checking vault location and hidden directories..."
+    echo "   🎯 Target path: $abs_path"
+  fi
+
+  # Check if the file is within the vault life directory
+  if [[ "$abs_path" == /path/to/your/obsidian/vault/* ]]; then
+    [ "$DEBUG_MODE" = "True" ] && echo "   ✅ IN VAULT: Path starts with /path/to/your/obsidian/vault/"
+
+    # Also check that no ancestor folders are hidden (start with .)
+    # Remove the base path to get just the relative path within life/
+    relative_path="${abs_path#/path/to/your/obsidian/vault/}"
+    [ "$DEBUG_MODE" = "True" ] && echo "   🔄 Relative path within vault: $relative_path"
+
+    # Split the path into components and check each directory
+    has_hidden_ancestor=false
+    IFS='/' read -ra path_parts <<< "$relative_path"
+
+    [ "$DEBUG_MODE" = "True" ] && echo "   🔍 Checking path components for hidden directories:"
+    # Get the number of parts to identify the last one (filename)
+    num_parts=${#path_parts[@]}
+
+    for i in "${!path_parts[@]}"; do
+      part="${path_parts[i]}"
+      # Skip empty parts and the filename (last part)
+      if [[ -n "$part" && $i -lt $((num_parts - 1)) ]]; then
+        [ "$DEBUG_MODE" = "True" ] && echo "      📁 Directory component [$i]: '$part'"
+        # Check if this directory starts with a dot
+        if [[ "$part" == .* ]]; then
+          has_hidden_ancestor=true
+          [ "$DEBUG_MODE" = "True" ] && echo "         ❌ HIDDEN: Directory starts with '.'"
+          break
+        else
+          [ "$DEBUG_MODE" = "True" ] && echo "         ✅ VISIBLE: Directory is not hidden"
+        fi
+      elif [[ $i -eq $((num_parts - 1)) ]]; then
+        [ "$DEBUG_MODE" = "True" ] && echo "      📄 Filename component [$i]: '$part' (skipped from hidden check)"
+      fi
+    done
+
+    # Only set is_in_vault to true if no hidden ancestors found
+    if [ "$has_hidden_ancestor" = false ]; then
+      is_in_vault=true
+      [ "$DEBUG_MODE" = "True" ] && echo "   ✅ VAULT ELIGIBLE: No hidden ancestor directories found"
+    else
+      [ "$DEBUG_MODE" = "True" ] && echo "   ❌ VAULT REJECTED: Hidden ancestor directory found"
+    fi
+  else
+    [ "$DEBUG_MODE" = "True" ] && echo "   ❌ NOT IN VAULT: Path does not start with /path/to/your/obsidian/vault/"
+  fi
+
+  if [ "$DEBUG_MODE" = "True" ]; then
+    echo ""
+    echo "📊 CURRENT STATUS:"
+    echo "   is_markdown = $is_markdown"
+    echo "   is_in_vault = $is_in_vault"
+  fi
+
+  # If we found both conditions, we can break early
+  if [ "$is_markdown" = true ] && [ "$is_in_vault" = true ]; then
+    [ "$DEBUG_MODE" = "True" ] && echo "   🎉 BOTH CONDITIONS MET - Breaking early"
+    break
+  fi
+done
+
+if [ "$DEBUG_MODE" = "True" ]; then
+  echo ""
+  echo "🎯 FINAL DECISION:"
+  echo "   is_markdown = $is_markdown"
+  echo "   is_in_vault = $is_in_vault"
+fi
+
+# Use obsidian_mv only if BOTH conditions are met
+if [ "$is_markdown" = true ] && [ "$is_in_vault" = true ]; then
+  [ "$DEBUG_MODE" = "True" ] && echo "   ✅ DECISION: Using obsidian_mv (conditions met)"
+
+  if [ "$DEBUG_MODE" = "True" ]; then
+    echo ""
+    echo "🔧 PREPARING obsidian_mv ARGUMENTS:"
+  fi
+
+  # Convert arguments to be relative to vault root
+  vault_args=()
+  for arg in "$@"; do
+    # Skip flags
+    if [[ "$arg" == -* ]]; then
+      vault_args+=("$arg")
+      [ "$DEBUG_MODE" = "True" ] && echo "   ⏭️  Flag: $arg"
+      continue
+    fi
+
+    # Convert to absolute path, then to vault-relative path
+    if [[ -e "$arg" ]]; then
+      abs_path=$(realpath "$arg")
+    else
+      parent_dir=$(dirname "$arg")
+      filename=$(basename "$arg")
+      if [[ -d "$parent_dir" ]]; then
+        parent_abs=$(realpath "$parent_dir")
+        abs_path="$parent_abs/$filename"
+      else
+        abs_path="$(pwd)/$arg"
+      fi
+    fi
+
+    # Convert absolute path to vault-relative path
+    if [[ "$abs_path" == /path/to/your/obsidian/vault/* ]]; then
+      vault_relative="${abs_path#/path/to/your/obsidian/vault/}"
+      vault_args+=("$vault_relative")
+      [ "$DEBUG_MODE" = "True" ] && echo "   🔄 Converted: $arg -> $vault_relative"
+    else
+      vault_args+=("$arg")  # fallback to original
+      [ "$DEBUG_MODE" = "True" ] && echo "   ⚠️  Not in vault, using as-is: $arg"
+    fi
+  done
+
+  if [ "$DEBUG_MODE" = "True" ]; then
+    echo ""
+    echo "🚀 EXECUTING obsidian_mv:"
+    echo "   📂 Working directory: /Users/mikew/vault/life"
+    echo "   📋 Command: obsidian_mv ${vault_args[*]}"
+  fi
+
+  # Change to the life directory and call obsidian_mv with converted paths
+  (cd /Users/mikew/vault/life && obsidian_mv "${vault_args[@]}")
+else
+  if [ "$DEBUG_MODE" = "True" ]; then
+    echo "   🛡️  DECISION: Using regular mv (conditions not met)"
+    echo ""
+    echo "🚀 EXECUTING standard mv:"
+    echo "   📋 Command: /bin/mv $*"
+  fi
+
+  # Use standard mv for everything else
+  /bin/mv "$@"
+fi

@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""
+mdget - A utility for extracting specific YAML frontmatter data from a single markdown file
+"""
+
+import argparse
+import os
+import sys
+import yaml
+import re
+from pathlib import Path
+from typing import Dict, List, Any, Optional
+
+# Import formatters from utilities_data
+script_dir = Path(__file__).parent
+utilities_dir = script_dir.parent
+formatters_dir = utilities_dir / "utilities_data" / "mdget"
+sys.path.append(str(formatters_dir))
+from formatters import format_output
+
+
+class MarkdownGet:
+    def __init__(self, file_path: str):
+        self.file_path = Path(file_path)
+        self.yaml_data = None
+        
+    def extract_yaml_frontmatter(self) -> Optional[Dict[str, Any]]:
+        """Extract YAML front matter from the markdown file"""
+        if not self.file_path.exists():
+            raise FileNotFoundError(f"File not found: {self.file_path}")
+        
+        if not self.file_path.is_file():
+            raise ValueError(f"Path is not a file: {self.file_path}")
+        
+        try:
+            with open(self.file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Check for YAML front matter (--- at start, --- to end)
+            if not content.startswith('---\n'):
+                return None
+            
+            # Find the end of the front matter
+            end_match = re.search(r'\n---\n', content)
+            if not end_match:
+                return None
+            
+            yaml_content = content[4:end_match.start()]  # Skip first ---\n
+            return yaml.safe_load(yaml_content)
+            
+        except Exception as e:
+            raise Exception(f"Failed to parse YAML: {e}")
+    
+    def get_property(self, property_name: str) -> Any:
+        """Get a specific property from the YAML frontmatter"""
+        if self.yaml_data is None:
+            return None
+        return self.yaml_data.get(property_name, None)
+    
+    def get_properties(self, property_names: List[str]) -> Dict[str, Any]:
+        """Get multiple specific properties from the YAML frontmatter"""
+        if self.yaml_data is None:
+            return {}
+        return {prop: self.yaml_data.get(prop, None) for prop in property_names}
+    
+    def list_all_properties(self) -> Dict[str, Any]:
+        """Get all YAML properties"""
+        return self.yaml_data or {}
+
+
+def create_parser() -> argparse.ArgumentParser:
+    """Create argument parser"""
+    parser = argparse.ArgumentParser(
+        description="""
+📄 MARKDOWN METADATA EXTRACTOR
+
+Get metadata from your markdown files instantly - no need to open them!
+
+WHAT IS THIS FOR?
+Many markdown files start with metadata at the top, like this:
+    ---
+    title: My Blog Post
+    author: John Smith  
+    tags: [python, tutorial]
+    date: 2024-01-15
+    ---
+    # Your content here...
+
+This tool lets you quickly extract that metadata without opening the file.
+
+PERFECT FOR:
+• Getting the title of a blog post or note
+• Finding the author, date, or tags of an article  
+• Extracting any metadata for scripts or automation
+• Checking what metadata fields a file has
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+GETTING STARTED:
+  First, see what's in your file:
+    %(prog)s my-article.md --all                      # Show everything
+  
+  Then extract what you need:
+    %(prog)s my-article.md -p title                   # Get the title
+    %(prog)s my-article.md -p title --output value    # Just "My Blog Post"
+    %(prog)s my-article.md -p author,date             # Get multiple fields
+
+COMMON EXAMPLES:
+  Get blog post title:        %(prog)s post.md -p title --output value
+  Get all tags as JSON:       %(prog)s note.md -p tags --output json  
+  Get multiple fields:        %(prog)s article.md -p title,author,date
+  Script-friendly output:     %(prog)s file.md -p tags --raw
+  See all available data:     %(prog)s file.md --all
+
+OUTPUT FORMATS:
+  keyvalue (default):  title: My Blog Post
+  value:              My Blog Post  
+  json:               {"title": "My Blog Post"}
+  
+TECHNICAL NOTE: This extracts YAML frontmatter (the metadata section between --- lines)
+        """)
+    
+    parser.add_argument('file', help='Path to the markdown file')
+    
+    # Property selection
+    selection = parser.add_argument_group('🎯 Property Selection')
+    selection.add_argument('--property', '-p', metavar='PROPERTY', action='append',
+                          help='Extract specific property (can be used multiple times or comma-separated)')
+    selection.add_argument('--all', action='store_true',
+                          help='Show all YAML properties in the file')
+    
+    # Output options
+    output = parser.add_argument_group('📋 Output Format')
+    output.add_argument('--output', choices=['keyvalue', 'value', 'json'], default='keyvalue',
+                       help='Output format: keyvalue=key: value (default), value=just the value, json=JSON format')
+    output.add_argument('--raw', action='store_true',
+                       help='Output raw values without any formatting (useful for scripting)')
+    
+    return parser
+
+
+def main():
+    parser = create_parser()
+    args = parser.parse_args()
+    
+    # Initialize getter
+    mg = MarkdownGet(args.file)
+    
+    try:
+        mg.yaml_data = mg.extract_yaml_frontmatter()
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    
+    if mg.yaml_data is None:
+        print(f"Error: No YAML frontmatter found in {args.file}", file=sys.stderr)
+        sys.exit(1)
+    
+    # Handle --all option
+    if args.all:
+        all_properties = mg.list_all_properties()
+        format_output(all_properties, args.output, None, args.raw)
+        return
+    
+    # Handle property extraction
+    if not args.property:
+        print("Error: Must specify --property or --all", file=sys.stderr)
+        sys.exit(1)
+    
+    # Collect all requested properties
+    properties = []
+    for prop_arg in args.property:
+        if ',' in prop_arg:
+            properties.extend([p.strip() for p in prop_arg.split(',')])
+        else:
+            properties.append(prop_arg.strip())
+    
+    # Get the requested properties
+    if len(properties) == 1:
+        # Single property
+        value = mg.get_property(properties[0])
+        format_output({properties[0]: value}, args.output, properties[0], args.raw)
+    else:
+        # Multiple properties
+        values = mg.get_properties(properties)
+        format_output(values, args.output, None, args.raw)
+
+
+if __name__ == '__main__':
+    main()

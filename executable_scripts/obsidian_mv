@@ -1,0 +1,298 @@
+#!/usr/bin/env python3
+"""
+Move/rename a note in Obsidian vault and update all references to it.
+Similar to the Unix 'mv' command, this can rename files in place or move them to different directories.
+Uses the shared ObsidianAPI module.
+
+Usage:
+    python3 obsidian_mv.py "old note" "new note" [--dry-run] [--json]
+    python3 obsidian_mv.py "test/note" "archive/note" [--dry-run] [--json]
+"""
+
+import json
+import sys
+import argparse
+from pathlib import Path
+from typing import Dict
+
+# Add the data directory to Python path to import obsidian_api
+script_dir = Path(__file__).parent
+utilities_dir = script_dir.parent
+data_dir = utilities_dir / "utilities_data" / "obsidian_mv"
+sys.path.insert(0, str(data_dir))
+
+from obsidian_api import ObsidianAPI
+
+
+def load_settings() -> Dict:
+    """Load settings from the settings.json file."""
+    script_dir = Path(__file__).parent
+    utilities_dir = script_dir.parent
+    data_dir = utilities_dir / "utilities_data" / "obsidian_mv"
+    settings_file = data_dir / "settings.json"
+
+    try:
+        with open(settings_file, 'r') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        raise Exception(f"Could not load settings from {settings_file}")
+
+
+def resolve_path_from_cwd(user_path: str) -> str:
+    """
+    Convert user path to vault-relative path using current working directory.
+
+    Args:
+        user_path: Path provided by user (e.g., "popular.md")
+
+    Returns:
+        Path relative to vault root (e.g., "test/popular.md")
+    """
+    settings = load_settings()
+    vault_root = Path(settings['vault_root'])
+    current_dir = Path.cwd()
+    user_path_obj = Path(user_path)
+
+    # If user provided absolute path, make it relative to vault root
+    if user_path_obj.is_absolute():
+        try:
+            return str(user_path_obj.relative_to(vault_root))
+        except ValueError:
+            return user_path
+
+    # If we're inside the vault, combine current directory + user path
+    try:
+        # Get current directory relative to vault root (e.g., "test")
+        current_relative_to_vault = current_dir.relative_to(vault_root)
+
+        # Combine with user path (e.g., "test" + "popular.md" = "test/popular.md")
+        return str(current_relative_to_vault / user_path_obj)
+
+    except ValueError:
+        # We're not inside the vault, use user path as-is
+        return user_path
+
+
+def update_references_in_file(api: ObsidianAPI, filepath: str, old_name: str, new_name: str, dry_run: bool = False) -> Dict:
+    """Update all references to old_name with new_name in the given file."""
+    result = {
+        'file': filepath,
+        'references_found': 0,
+        'references_updated': 0,
+        'changes': []
+    }
+
+    # Extract link references from the file
+    references = api.extract_link_references_from_file(filepath, old_name)
+    if references is None:
+        result['error'] = 'Could not read file'
+        return result
+
+    result['references_found'] = len(references)
+
+    if references:
+        # Get file content
+        content = api.get_file_content(filepath)
+        if content is None:
+            result['error'] = 'Could not read file content'
+            return result
+
+        # Update each reference
+        new_content = content
+        for link_ref in references:
+            replacement = api.generate_link_replacement(link_ref, old_name, new_name)
+            result['changes'].append({
+                'original': link_ref,
+                'replacement': replacement
+            })
+            # Perform the replacement
+            new_content = new_content.replace(link_ref, replacement)
+
+        if not dry_run:
+            # Update the file
+            if api.update_file_content(filepath, new_content):
+                result['references_updated'] = len(references)
+            else:
+                result['error'] = 'Failed to update file'
+        else:
+            result['references_updated'] = len(references)
+            result['dry_run'] = True
+
+    return result
+
+
+def rename_note(api: ObsidianAPI, old_name: str, new_name: str, dry_run: bool = False) -> Dict:
+    """
+    Main function to rename a note and update all references.
+    """
+    # Resolve paths relative to current working directory
+    resolved_old = resolve_path_from_cwd(old_name)
+    resolved_new = resolve_path_from_cwd(new_name)
+
+    results = {
+        'old_name': resolved_old,
+        'new_name': resolved_new,
+        'rename_success': False,
+        'references_updated': [],
+        'total_references': 0,
+        'total_updated': 0
+    }
+
+    # Normalize paths (add .md if not present)
+    if not resolved_old.endswith('.md'):
+        resolved_old = f"{resolved_old}.md"
+    if not resolved_new.endswith('.md'):
+        resolved_new = f"{resolved_new}.md"
+
+    # Update results with normalized names
+    results['old_name'] = resolved_old
+    results['new_name'] = resolved_new
+
+    old_name = resolved_old
+    new_name = resolved_new
+
+    # Check if source file exists
+    if api.get_file_content(old_name) is None:
+        results['error'] = f"Source file '{old_name}' not found"
+        return results
+
+    # Load settings to check debug mode
+    settings = load_settings()
+    debug_mode = settings.get('debug_mode', False)
+
+    # Find all files that reference the old note
+    if debug_mode:
+        print(f"\nFinding references to '{old_name}'...")
+    referencing_data = api.find_references(old_name)
+    referencing_files = [ref['filename'] for ref in referencing_data]
+    if debug_mode:
+        print(f"Found {len(referencing_files)} file(s) with references")
+
+    # Update references in each file
+    for ref_file in referencing_files:
+        if debug_mode:
+            print(f"Processing {ref_file}...")
+        update_result = update_references_in_file(api, ref_file, old_name, new_name, dry_run)
+        results['references_updated'].append(update_result)
+        results['total_references'] += update_result['references_found']
+        results['total_updated'] += update_result['references_updated']
+
+    # Rename the actual file
+    if not dry_run:
+        if debug_mode:
+            print(f"\nRenaming '{old_name}' to '{new_name}'...")
+        if api.rename_file(old_name, new_name):
+            results['rename_success'] = True
+            if debug_mode:
+                print("File renamed successfully")
+        else:
+            results['error'] = "Failed to rename file"
+    else:
+        results['rename_success'] = True
+        results['dry_run'] = True
+        if debug_mode:
+            print(f"\n[DRY RUN] Would rename '{old_name}' to '{new_name}'")
+
+    return results
+
+
+def print_results(results: Dict, debug_mode: bool = False):
+    """Print the results in a formatted way."""
+    if debug_mode:
+        print("\n" + "=" * 60)
+        print("RENAME OPERATION SUMMARY")
+        print("=" * 60)
+
+        if 'dry_run' in results:
+            print("🔍 DRY RUN MODE - No changes were made")
+
+    # Always show the basic rename result
+    if debug_mode:
+        print(f"\n📄 File rename: {results['old_name']} → {results['new_name']}")
+        print(f"   Status: {'✓ Success' if results['rename_success'] else '✗ Failed'}")
+    else:
+        # In quiet mode, just show a simple success/failure message
+        if results['rename_success']:
+            print(f"✓ Renamed: {results['old_name']} → {results['new_name']}")
+            if results['total_references'] > 0:
+                print(f"  Updated {results['total_updated']} references in {len(results['references_updated'])} files")
+        else:
+            print(f"✗ Failed to rename: {results['old_name']} → {results['new_name']}")
+
+    # Always show errors
+    if 'error' in results:
+        print(f"\n⚠️  Error: {results['error']}")
+        return
+
+    # Only show detailed breakdown in debug mode
+    if debug_mode:
+        print(f"\n📊 References updated:")
+        print(f"   Total references found: {results['total_references']}")
+        print(f"   Total references updated: {results['total_updated']}")
+
+        if results['references_updated']:
+            print(f"\n📝 Files processed:")
+            for file_result in results['references_updated']:
+                status = "✓" if file_result.get('references_updated', 0) > 0 else "-"
+                print(f"   {status} {file_result['file']} ({file_result['references_found']} reference(s))")
+
+                if file_result.get('changes'):
+                    for change in file_result['changes']:
+                        print(f"      • {change['original']} → {change['replacement']}")
+
+                if 'error' in file_result:
+                    print(f"      ⚠️ {file_result['error']}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Move/rename a note in Obsidian vault and update all references."
+    )
+    parser.add_argument(
+        'source',
+        help='Current name/path of the note (e.g., "popular note" or "test/popular note.md")'
+    )
+    parser.add_argument(
+        'destination',
+        help='New name/path for the note (e.g., "renamed note" or "archive/renamed note.md")'
+    )
+    parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='Preview changes without executing them'
+    )
+    parser.add_argument(
+        '--json',
+        action='store_true',
+        help='Output results as JSON format'
+    )
+
+    args = parser.parse_args()
+
+    try:
+        # Initialize API
+        api = ObsidianAPI()
+
+        # Perform the move/rename
+        results = rename_note(api, args.source, args.destination, args.dry_run)
+
+        # Output results
+        if args.json:
+            print(json.dumps(results, indent=2))
+        else:
+            # Load settings to check debug mode for output
+            settings = load_settings()
+            debug_mode = settings.get('debug_mode', False)
+            print_results(results, debug_mode)
+
+        # Exit with appropriate code
+        if 'error' in results:
+            sys.exit(1)
+
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
